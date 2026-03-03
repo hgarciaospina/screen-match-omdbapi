@@ -1,30 +1,45 @@
 package com.alura.screenmatch.principal;
 
-import com.alura.screenmatch.model.DatosEpisodio;
 import com.alura.screenmatch.model.DatosSerie;
 import com.alura.screenmatch.model.DatosTemporada;
 import com.alura.screenmatch.service.ConsumoAPI;
 import com.alura.screenmatch.service.ConvierteDatos;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Scanner;
+import java.util.stream.IntStream;
 
 /**
+ * ==========================================================
+ * Principal
+ * ==========================================================
+ *
  * Clase responsable de la interacción con el usuario vía consola.
  *
- * Responsabilidades:
- * - Solicitar entrada al usuario.
- * - Construir las URLs necesarias para consumir la API OMDb.
- * - Validar respuestas.
- * - Coordinar la obtención de datos generales y temporadas.
- * - Delegar la presentación formateada en métodos internos.
+ * RESPONSABILIDADES:
+ *  ✔ Solicitar entrada del usuario.
+ *  ✔ Construir dinámicamente URLs para la API OMDb.
+ *  ✔ Validar respuestas externas.
+ *  ✔ Evitar NullPointerException.
+ *  ✔ Orquestar la obtención de:
+ *        - Datos generales de la serie
+ *        - Temporadas
+ *        - Episodios
+ *  ✔ Presentar la información de manera estructurada.
+ *
+ * CARACTERÍSTICAS TÉCNICAS:
+ *  - Uso de programación funcional (Streams y Lambdas).
+ *  - Uso de Optional para manejo seguro de valores.
+ *  - Validación explícita del campo "Response" devuelto por OMDb.
+ *  - Manejo defensivo ante fallos de red o datos inválidos.
+ *
+ * Esta clase actúa como ORQUESTADOR entre:
+ *  - Usuario
+ *  - ConsumoAPI (cliente HTTP)
+ *  - ConvierteDatos (deserialización JSON → Objetos)
  *
  * No contiene lógica de negocio compleja.
- * Actúa como orquestador entre:
- * - Usuario
- * - ConsumoAPI (HTTP)
- * - ConvierteDatos (JSON → Objetos)
  */
 public class Principal {
 
@@ -36,7 +51,7 @@ public class Principal {
     private final ConvierteDatos convierteDatos = new ConvierteDatos();
 
     /**
-     * Constructor que recibe configuración externa (variables de entorno).
+     * Constructor que recibe configuración externa.
      *
      * @param omdbUrl    URL base de OMDb
      * @param omdbApiKey API Key de autenticación
@@ -47,8 +62,15 @@ public class Principal {
     }
 
     /**
-     * Método principal de ejecución.
-     * Controla todo el flujo de consulta.
+     * Método principal que controla el flujo completo:
+     *
+     * 1️⃣ Solicita nombre de serie.
+     * 2️⃣ Consulta datos generales.
+     * 3️⃣ Valida respuesta lógica de la API.
+     * 4️⃣ Consulta temporadas.
+     * 5️⃣ Presenta información estructurada.
+     *
+     * Nunca lanza excepciones visibles al usuario.
      */
     public void muestraElMenu() {
 
@@ -61,48 +83,115 @@ public class Principal {
             return;
         }
 
-        // ====== Consulta de información general ======
-        String url = construirUrl(nombreSerie, null);
-        String json = consumoAPI.obtenerDatos(url);
-        DatosSerie datos = convierteDatos.obtenerDatos(json, DatosSerie.class);
+        obtenerSerie(nombreSerie)
+                .ifPresentOrElse(serie -> {
 
-        if (datos == null || datos.totalTemporadas() == null) {
-            System.out.println("❌ Serie no encontrada.");
-            return;
-        }
+                    mostrarDatosSerie(serie);
 
-        mostrarDatosSerie(datos);
+                    obtenerTemporadas(nombreSerie, serie)
+                            .ifPresentOrElse(
+                                    this::mostrarTemporadas,
+                                    () -> System.out.println("⚠ No se encontraron temporadas.")
+                            );
 
-        int totalTemporadas;
-
-        try {
-            totalTemporadas = Integer.parseInt(datos.totalTemporadas());
-        } catch (NumberFormatException e) {
-            System.out.println("❌ Error al interpretar el número de temporadas.");
-            return;
-        }
-
-        // ====== Consulta de temporadas ======
-        List<DatosTemporada> temporadas = new ArrayList<>();
-
-        for (int i = 1; i <= totalTemporadas; i++) {
-
-            url = construirUrl(nombreSerie, i);
-            json = consumoAPI.obtenerDatos(url);
-
-            DatosTemporada temporada =
-                    convierteDatos.obtenerDatos(json, DatosTemporada.class);
-
-            if (temporada != null) {
-                temporadas.add(temporada);
-            }
-        }
-
-        mostrarTemporadas(temporadas);
+                }, () -> System.out.println("❌ Serie no encontrada o sin acceso a la API."));
     }
 
     /**
-     * Construye dinámicamente la URL para consultar la API.
+     * Consulta la información general de una serie.
+     *
+     * VALIDACIONES:
+     *  - Respuesta nula o vacía.
+     *  - Objeto deserializado nulo.
+     *  - Campo "Response" = "False" (serie inexistente).
+     *
+     * @param nombreSerie Nombre ingresado por el usuario.
+     * @return Optional con DatosSerie válido.
+     */
+    private Optional<DatosSerie> obtenerSerie(String nombreSerie) {
+
+        try {
+
+            String url = construirUrl(nombreSerie, null);
+            String json = consumoAPI.obtenerDatos(url);
+
+            if (json == null || json.isBlank()) {
+                return Optional.empty();
+            }
+
+            DatosSerie serie =
+                    convierteDatos.obtenerDatos(json, DatosSerie.class);
+
+            if (serie == null) {
+                return Optional.empty();
+            }
+
+            // 🔥 VALIDACIÓN CLAVE
+            if ("False".equalsIgnoreCase(serie.respuesta())) {
+                return Optional.empty();
+            }
+
+            return Optional.of(serie);
+
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Obtiene todas las temporadas de la serie usando programación funcional.
+     *
+     * Utiliza IntStream para evitar bucles imperativos.
+     *
+     * VALIDACIONES:
+     *  - totalTemporadas numéricamente válido.
+     *  - Respuestas JSON válidas.
+     *  - Temporadas no nulas.
+     *
+     * @param nombreSerie Nombre de la serie.
+     * @param serie       Datos generales previamente validados.
+     * @return Optional con lista de temporadas.
+     */
+    private Optional<List<DatosTemporada>> obtenerTemporadas(
+            String nombreSerie,
+            DatosSerie serie) {
+
+        try {
+
+            int totalTemporadas = Integer.parseInt(serie.totalTemporadas());
+
+            List<DatosTemporada> temporadas = IntStream
+                    .rangeClosed(1, totalTemporadas)
+                    .mapToObj(numeroTemporada -> {
+
+                        String url = construirUrl(nombreSerie, numeroTemporada);
+                        String json = consumoAPI.obtenerDatos(url);
+
+                        if (json == null || json.isBlank()) {
+                            return null;
+                        }
+
+                        return convierteDatos.obtenerDatos(
+                                json,
+                                DatosTemporada.class
+                        );
+                    })
+                    .filter(temporada ->
+                            temporada != null &&
+                                    temporada.episodios() != null)
+                    .toList();
+
+            return temporadas.isEmpty()
+                    ? Optional.empty()
+                    : Optional.of(temporadas);
+
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Construye dinámicamente la URL para consumir la API OMDb.
      *
      * @param nombreSerie Nombre de la serie.
      * @param temporada   Número de temporada (null si es consulta general).
@@ -110,24 +199,17 @@ public class Principal {
      */
     private String construirUrl(String nombreSerie, Integer temporada) {
 
-        StringBuilder url = new StringBuilder();
-        url.append(urlBase)
-                .append("?t=")
-                .append(nombreSerie.replace(" ", "+"));
-
-        if (temporada != null) {
-            url.append("&Season=").append(temporada);
-        }
-
-        url.append("&apikey=").append(apiKey);
-
-        return url.toString();
+        return urlBase +
+                "?t=" + nombreSerie.replace(" ", "+") +
+                (temporada != null ? "&Season=" + temporada : "") +
+                "&apikey=" + apiKey;
     }
 
     /**
-     * Muestra el encabezado principal de la aplicación.
+     * Muestra encabezado visual de la aplicación.
      */
     private void mostrarEncabezado() {
+
         System.out.println("==================================================");
         System.out.println("           BÚSQUEDA DE SERIES - OMDb");
         System.out.println("==================================================");
@@ -135,10 +217,9 @@ public class Principal {
     }
 
     /**
-     * Presenta la información general de la serie
-     * en formato estructurado y alineado.
+     * Presenta la información general validada de la serie.
      *
-     * @param datos Información general de la serie.
+     * @param datos Serie previamente validada.
      */
     private void mostrarDatosSerie(DatosSerie datos) {
 
@@ -156,9 +237,9 @@ public class Principal {
     }
 
     /**
-     * Presenta las temporadas y episodios formateados.
+     * Presenta temporadas y episodios utilizando programación funcional.
      *
-     * @param temporadas Lista de temporadas obtenidas.
+     * @param temporadas Lista validada de temporadas.
      */
     private void mostrarTemporadas(List<DatosTemporada> temporadas) {
 
@@ -166,21 +247,22 @@ public class Principal {
         System.out.println("              DETALLE DE TEMPORADAS");
         System.out.println("==================================================");
 
-        for (DatosTemporada temporada : temporadas) {
+        temporadas.forEach(temporada -> {
 
             System.out.printf("%nTemporada %s%n", temporada.temporada());
             System.out.println("--------------------------------------------------");
 
-            for (DatosEpisodio episodio : temporada.episodios()) {
-                System.out.printf(
-                        "E%02d | %-40s | ⭐ %-4s | %s%n",
-                        episodio.numeroEpisodio(),
-                        episodio.titulo(),
-                        episodio.evaluacion(),
-                        episodio.fechaDeLanzamiento()
-                );
-            }
-        }
+            temporada.episodios()
+                    .forEach(episodio ->
+                            System.out.printf(
+                                    "E%02d | %-40s | ⭐ %-4s | %s%n",
+                                    episodio.numeroEpisodio(),
+                                    episodio.titulo(),
+                                    episodio.evaluacion(),
+                                    episodio.fechaDeLanzamiento()
+                            )
+                    );
+        });
 
         System.out.println("\n==================================================");
     }
